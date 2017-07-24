@@ -1,0 +1,208 @@
+#!/bin/sh
+# vim: set ts=8 sw=4 sts=4 et ai:
+# dnsgit -- (Power)DNS bookkeeping using git.
+# Copyright (C) 2016,2017 Walter Doekes, OSSO B.V.
+
+# Default configuration, override through /etc/default/dnsgit.
+_domains_from_powerdns() {
+    _powerdns_db=powerdns
+    mysql --defaults-file=/etc/mysql/debian.cnf \
+      -Ne "SELECT CONCAT(name, '.') FROM domains
+           WHERE name <> '' ORDER BY name;" "$_powerdns_db"
+}
+LIST_DOMAINS_CMD=_domains_from_powerdns
+GIT_DIR=/srv/dnsgit
+AXFR_HOST=127.0.0.1
+
+# Run me through cron:
+# (see also https://github.com/PowerDNS/pdns/issues/4690 )
+# 25 0,12 * * *   root    /usr/local/bin/dnsgit update-all
+
+# Searching:
+# - git log --grep ^changed: -S klikenbestel
+# - git log --invert-grep --grp ^dnssec: -S klikenbestel
+
+short_help_and_exit() {
+    echo "Usage: dnsgit COMMAND ARGS.." >&2
+    echo "See: dnsgit help" >&2
+    exit 1
+}
+
+
+# Optionally Load configuration from /etc/default/dnsgit.
+test -f /etc/default/dnsgit && . /etc/default/dnsgit
+
+cd "$GIT_DIR" || exit 1
+cmd="$1"
+test -z "$cmd" && short_help_and_exit
+shift
+
+
+domains_from_git() {
+    find "$GIT_DIR" -type f '!' -path "$GIT_DIR/.git/*" -name '*.' |
+      sed -e 's#.*/##' | sort -V
+}
+
+domains_from_dns() {
+    $LIST_DOMAINS_CMD | sort -V
+}
+
+dump_domain() {
+    info=$(dig AXFR "$1" @"$AXFR_HOST" \
+           +nocomments +nostats +multi +rrcomments +onesoa)
+    # Unfortunately, dig (9.9.5-9+deb8u12-Debian) does not return
+    # non-zero for EOF-error.
+    # ";; communications error to 127.0.0.1#53: end of file"
+    if test $? -ne 0 ||
+            echo "$info" |
+            grep -q '^;; communications error to .*: end of file'; then
+        echo '********' >&2
+        echo "Error reading AXFR for: $1" >&2
+        echo >&2
+        echo "$info" | sed -e 's/^/    /' >&2
+        echo >&2
+        echo '********' >&2
+        false
+        return
+    fi
+
+    # Ok.
+    echo "$info" | python -c 'import sys, re
+def domains():
+    buf = []
+    for line in sys.stdin:
+        if not line.startswith(";") and line.strip():
+            if not line.startswith((" ", "\t")):
+                if buf:
+                    yield "".join(buf)
+                buf = []
+            buf.append(line)
+    if buf:
+        yield "".join(buf)
+order = ["SOA", "DNSKEY", "NS"]
+def sortkey(domain):
+    items = domain.split(None, 4)
+    try: index = order.index(items[3])
+    except: index = len(order)
+    return (len(items[0].split(".")), index, domain)
+l = list(domains())
+l.sort(key=sortkey)
+for line in l:
+    print(line)
+'
+}
+
+save_domain() {
+    host=$1
+    path=$(echo "$host" | sed -e 's#/##g;s#\(.\).*#\1/&#')
+    # test -f "$path" && return
+    tmp=$(dump_domain "$host")
+    if test $? != 0; then
+        false
+        return
+    fi
+
+    mkdir -p "${path%/*}"
+    echo "$tmp" | sed -e '
+      /^[^[:blank:]].*[[:blank:]]IN[[:blank:]]\(RRSIG\|NSEC3\)/,/^$/d' \
+      >"$path"
+    echo "$tmp" | sed -e '
+      /^[^[:blank:]].*[[:blank:]]IN[[:blank:]]\(RRSIG\|NSEC3\)/,/^$/!d' \
+      >"${path}dnssec"
+}
+
+remove_old_domains() {
+    diff "$1" "$2" | sed -e '/^> /!d;s/..//' |
+      while read domain; do
+        path=$(echo "$domain" | sed -e 's#/##g;s#\(.\).*#\1/&#')
+        git rm "$path" >/dev/null || rm "$path"
+        git rm "${path}dnssec" >/dev/null || rm "${path}dnssec"
+      done
+}
+
+generate_commit_msg() {
+    msg=$(git status --porcelain | sed -e 's#.*/##;/\.$/!d;s/$//' |
+          tr '\n' ' ' | sed -re '
+            /.{60}.*/s/(.{60}).*/changed: \1.../;/.{60}/!s/.*/changed: &/')
+    if test -n "$msg"; then
+        true
+    elif git status --porcelain | grep -v 'dnssec$' | grep -qF ''; then
+        msg='unknown changes? (fix this commit msg)'
+    elif git status --porcelain | grep -qF ''; then
+        msg='dnssec: rehash/resign (powerdns thursday?)'
+    else
+        msg=''  # nothing
+    fi
+    echo "$msg"
+}
+
+
+case $cmd in
+help|-h|--help)
+    echo "Usage: dnsgit COMMAND ARGS.."
+    echo
+    echo "Commands:"
+    echo "  domains               List domains to dump."
+    echo "  domain DOMAIN         Dump a single domain."
+    echo "  update-all            Dump domains, remove old, commit."
+    ;;
+domain)
+    dump_domain "$1" | sed -e '
+        /^[^[:blank:]].*[[:blank:]]IN[[:blank:]]\(RRSIG\|NSEC\)/,/^$/d'
+    ;;
+domains)
+    domains_from_dns
+    ;;
+update-all)
+    domains=$(domains_from_dns)
+    ret=0
+    for domain in $domains; do
+        save_domain $domain || ret=1
+    done
+
+    saved=$(mktemp)
+    echo "$domains" >"$saved"
+    local=$(mktemp)
+    domains_from_git >"$local"
+    remove_old_domains "$saved" "$local"
+    rm "$saved" "$local"
+
+    # Add all new/changed domains.
+    git add -A
+
+    # Attempt commit of non-dnssec changes first.
+    if git status --porcelain | sed -e 's/^...//;/\.dnssec$/d' |
+            grep -qF ''; then
+        msg=$(generate_commit_msg)
+        git commit -m "$msg" $(
+            git status --porcelain | sed -e 's/^...//;/\.dnssec$/d') \
+            >/dev/null
+        if test -t 1; then
+            echo "Committed: $msg"
+        else
+            git show
+        fi
+    fi
+
+    # Is there anything left? Create commit message and push.
+    msg=$(generate_commit_msg)
+    if test -n "$msg"; then
+        git commit -m "$msg" >/dev/null
+        if test -t 1; then
+            echo "Committed: $msg"
+        fi
+    fi
+
+    if test $ret -ne 0; then
+        echo >&2
+        echo "There were errors. See above." >&2
+        false
+    fi
+    ;;
+domain)
+    true
+    ;;
+*)
+    short_help_and_exit
+    ;;
+esac
