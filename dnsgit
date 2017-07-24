@@ -1,26 +1,44 @@
 #!/bin/sh
-# vim: set ts=8 sw=4 sts=4 et ai:
-# dnsgit -- (Power)DNS bookkeeping using git.
+# dnsgit -- Keep track of DNS server history using a Git repository
 # Copyright (C) 2016,2017 Walter Doekes, OSSO B.V.
+#
+# dnsgit is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or (at your
+# option) any later version.
+#
+# dnsgit has been tested against PowerDNS authoritative nameservers (3.4
+# and 4), but it should work with any nameserver that serves AXFR
+# records. Note that PowerDNS does not give stable/consistent AXFR
+# output by itself; see:
+# - https://github.com/PowerDNS/pdns/issues/2694
+# - https://github.com/PowerDNS/pdns/issues/4690
+#
+# Usage:
+# - set up repository in /srv/dnsgit (see GIT_DIR)
+# - run cron job: 25 0,12 * * * root /usr/local/bin/dnsgit update-all
+#
+# Searching through history is a as easy as using git-log and git-blame:
+# - git log --grep ^changed: -S example.com
+# - git log --invert-grep --grp ^dnssec: -S example.com
+# - git blame e/example.com.
+#
+# Dependencies: git, dig, python, sed, find
 
+########################################################################
 # Default configuration, override through /etc/default/dnsgit.
+########################################################################
 _domains_from_powerdns() {
-    _powerdns_db=powerdns
+    _database=powerdns
     mysql --defaults-file=/etc/mysql/debian.cnf \
-      -Ne "SELECT CONCAT(name, '.') FROM domains
-           WHERE name <> '' ORDER BY name;" "$_powerdns_db"
+      -Ne "SELECT CONCAT(name, '.') FROM domains WHERE name <> '';" \
+      "$_database"
 }
 LIST_DOMAINS_CMD=_domains_from_powerdns
 GIT_DIR=/srv/dnsgit
 AXFR_HOST=127.0.0.1
+########################################################################
 
-# Run me through cron:
-# (see also https://github.com/PowerDNS/pdns/issues/4690 )
-# 25 0,12 * * *   root    /usr/local/bin/dnsgit update-all
-
-# Searching:
-# - git log --grep ^changed: -S klikenbestel
-# - git log --invert-grep --grp ^dnssec: -S klikenbestel
 
 short_help_and_exit() {
     echo "Usage: dnsgit COMMAND ARGS.." >&2
@@ -28,8 +46,7 @@ short_help_and_exit() {
     exit 1
 }
 
-
-# Optionally Load configuration from /etc/default/dnsgit.
+# Optionally load configuration from /etc/default/dnsgit.
 test -f /etc/default/dnsgit && . /etc/default/dnsgit
 
 cd "$GIT_DIR" || exit 1
@@ -66,7 +83,7 @@ dump_domain() {
         return
     fi
 
-    # Ok.
+    # Ok. Normalize the output using a bit of python.
     echo "$info" | python -c 'import sys, re
 def domains():
     buf = []
@@ -206,3 +223,5 @@ domain)
     short_help_and_exit
     ;;
 esac
+
+# vim: set ts=8 sw=4 sts=4 et ai:
