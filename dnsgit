@@ -24,6 +24,7 @@
 # - git blame e/example.com.
 #
 # Dependencies: git, dig, python, sed, find
+# See also: ossobv/mailgit
 
 ########################################################################
 # Default configuration, override through /etc/default/dnsgit.
@@ -215,9 +216,6 @@ update-all)
         echo "There were errors. See above." >&2
         false
     fi
-    ;;
-domain)
-    true
     ;;
 *)
     short_help_and_exit
