@@ -25,7 +25,7 @@ Example setup
 
 .. code-block:: console
 
-    # install -T -o755 dnsgit /usr/local/dnsgit
+    # install -T -o755 dnsgit /usr/local/bin/dnsgit
     # mkdir /srv/dnsgit
     # cd /srv/dnsgit
 
@@ -42,15 +42,15 @@ For instance, a change may look like this:
 
 .. code-block:: console
 
-    # git show fb8c68e3522c36ad4aa90dd21553c812c7fd0de1
-    commit fb8c68e3522c36ad4aa90dd21553c812c7fd0de1
-    Author: root <root@ns1.osso.nl>
+    # git show fb8c68e3512c36ad3aa90ed215ffc812c7fd0dc1
+    commit fb8c68e3512c36ad3aa90ed215ffc812c7fd0dc1
+    Author: OSSO <anonymous@anonymous.invalid>
     Date:   Wed Jul 5 00:25:31 2017 +0200
 
         changed: osso.io.
 
     diff --git a/o/osso.io. b/o/osso.io.
-    index 7ed831e..03c5477 100644
+    index 7cd810e..0235414 100644
     --- a/o/osso.io.
     +++ b/o/osso.io.
     @@ -1,5 +1,5 @@
